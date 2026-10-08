@@ -290,4 +290,5 @@ document.querySelector('#next-question').addEventListener('click', () => {
 document.querySelector('#show-hint').addEventListener('click', () => { document.querySelector('#hint-text').hidden = !document.querySelector('#hint-text').hidden; });
 
 document.querySelector('#today-label').textContent = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' }).toUpperCase();
+setAuthMode('login');
 loadDashboard();
