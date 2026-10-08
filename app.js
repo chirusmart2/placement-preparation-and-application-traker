@@ -146,7 +146,7 @@ function setAuthMode(mode) {
   const registering = mode === 'register';
   document.querySelector('#auth-gate').classList.toggle('register-mode', registering);
   document.querySelector('#register-fields').hidden = !registering;
-  document.querySelector('#register-fields [name="full_name"]').required = registering;
+  document.querySelectorAll('#register-fields input').forEach((field) => { field.required = registering; });
   document.querySelector('#auth-title').textContent = registering ? 'Create your account' : 'Welcome back';
   document.querySelector('#auth-subtitle').textContent = registering ? 'Create a private space for your placement journey.' : 'Sign in to keep your applications private and in sync.';
   document.querySelector('#auth-submit').innerHTML = registering ? 'Create account <span>→</span>' : 'Sign in <span>→</span>';
@@ -198,7 +198,7 @@ document.querySelector('#logout-button').addEventListener('click', () => {
   recommendation = null;
   document.querySelector('#auth-gate').hidden = false;
   document.querySelector('#register-fields').hidden = true;
-  document.querySelector('#register-fields [name="full_name"]').required = false;
+  document.querySelectorAll('#register-fields input').forEach((field) => { field.required = false; });
   setAuthMode('login');
 });
 const profileDialog = document.querySelector('#profile-dialog');

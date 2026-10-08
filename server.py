@@ -263,7 +263,10 @@ class Handler(SimpleHTTPRequestHandler):
                 university = str(data.get("university", "")).strip()[:120]
                 target_role = str(data.get("target_role", "")).strip()[:120]
                 graduation_date = str(data.get("graduation_date", "")).strip()
-                if graduation_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", graduation_date):
+                if not full_name or not university or not target_role or not graduation_date:
+                    self.send_json({"error": "Complete your name, university, target role, and expected graduation date."}, 400)
+                    return
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", graduation_date):
                     self.send_json({"error": "Enter a valid graduation date."}, 400)
                     return
                 if graduation_date:
@@ -364,15 +367,20 @@ class Handler(SimpleHTTPRequestHandler):
         if not full_name or len(full_name) > 80:
             self.send_json({"error": "Enter your name (80 characters or fewer)."}, 400)
             return
+        if not university or not target_role or not graduation_date:
+            self.send_json({"error": "Complete your university, target role, and expected graduation date."}, 400)
+            return
         if len(university) > 120 or len(target_role) > 120:
             self.send_json({"error": "University and target role must be 120 characters or fewer."}, 400)
             return
-        if graduation_date:
-            try:
-                date.fromisoformat(graduation_date)
-            except ValueError:
-                self.send_json({"error": "Enter a valid graduation date."}, 400)
-                return
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", graduation_date):
+            self.send_json({"error": "Enter a valid graduation date."}, 400)
+            return
+        try:
+            date.fromisoformat(graduation_date)
+        except ValueError:
+            self.send_json({"error": "Enter a valid graduation date."}, 400)
+            return
         with connect_db() as db:
             execute(db, "UPDATE users SET full_name = ?, university = ?, target_role = ?, graduation_date = ? WHERE id = ?",
                     (full_name, university, target_role, graduation_date, user["id"]))
