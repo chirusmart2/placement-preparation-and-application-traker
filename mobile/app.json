@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "Pathway",
+    "slug": "pathway-placement-tracker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#f5f6f3"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.pathway.placementtracker"
+    },
+    "android": {
+      "package": "com.pathway.placementtracker",
+      "adaptiveIcon": {
+        "backgroundColor": "#1d694d"
+      }
+    }
+  }
+}
