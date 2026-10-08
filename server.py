@@ -1,56 +1,131 @@
-"""Pathway placement tracker: static frontend and JSON API backed by SQLite."""
+"""Pathway placement tracker with account authentication and SQLite/PostgreSQL storage."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+from datetime import date, datetime
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import sqlite3
-from datetime import date
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Iterator
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT / "data"))
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-DB_PATH = Path(os.environ.get("DATABASE_PATH", DATA_DIR / "pathway.sqlite3"))
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+USE_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
+if DATABASE_URL and not USE_POSTGRES:
+    raise RuntimeError("DATABASE_URL must be a PostgreSQL connection URL.")
+if USE_POSTGRES:
+    DB_PATH = None
+else:
+    DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT / "data"))
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DB_PATH = Path(os.environ.get("DATABASE_PATH", DATA_DIR / "pathway.sqlite3"))
+
+_auth_secret = os.environ.get("AUTH_SECRET", "")
+if _auth_secret and len(_auth_secret.encode("utf-8")) < 32:
+    raise RuntimeError("AUTH_SECRET must contain at least 32 bytes.")
+AUTH_SECRET = _auth_secret.encode("utf-8") if _auth_secret else secrets.token_bytes(32)
+TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7
+PASSWORD_ITERATIONS = 310_000
 VALID_STATUSES = {"Applied", "In review", "Interview", "Offer"}
-SEED = [
-    ("Northstar Labs", "Software Engineer Intern", "Interview", "2026-10-14"),
-    ("Acme Technologies", "Frontend Developer", "In review", "2026-10-16"),
-    ("Figma", "Product Design Intern", "Applied", "2026-10-19"),
-    ("Vercel", "Software Engineer Intern", "Applied", "2026-10-22"),
-    ("Stripe", "Product Engineer Intern", "In review", "2026-10-26"),
-]
 
 
-def connect_db() -> sqlite3.Connection:
-    connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
-    return connection
+@contextmanager
+def connect_db() -> Iterator:
+    if USE_POSTGRES:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        connection = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    else:
+        connection = sqlite3.connect(DB_PATH)
+        connection.row_factory = sqlite3.Row
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+def execute(db, statement: str, parameters=()):
+    if USE_POSTGRES:
+        statement = statement.replace("?", "%s")
+    return db.execute(statement, parameters)
 
 
 def initialize_db() -> None:
     with connect_db() as db:
-        db.execute("""CREATE TABLE IF NOT EXISTS applications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id_column = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        execute(db, f"""CREATE TABLE IF NOT EXISTS users (
+            id {user_id_column},
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+
+        id_column = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        deadline_column = "DATE NOT NULL" if USE_POSTGRES else "TEXT NOT NULL"
+        execute(db, f"""CREATE TABLE IF NOT EXISTS applications (
+            id {id_column},
+            user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
             company TEXT NOT NULL,
             role TEXT NOT NULL,
             status TEXT NOT NULL CHECK(status IN ('Applied', 'In review', 'Interview', 'Offer')),
-            deadline TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            deadline {deadline_column},
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""")
-        count = db.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
-        if count == 0:
-            db.executemany(
-                "INSERT INTO applications(company, role, status, deadline) VALUES (?, ?, ?, ?)",
-                SEED,
-            )
+
+        if USE_POSTGRES:
+            execute(db, "ALTER TABLE applications ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE CASCADE")
+        else:
+            columns = {row["name"] for row in execute(db, "PRAGMA table_info(applications)").fetchall()}
+            if "user_id" not in columns:
+                execute(db, "ALTER TABLE applications ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
+        execute(db, "CREATE INDEX IF NOT EXISTS applications_user_deadline ON applications(user_id, deadline)")
 
 
-def application_dict(row: sqlite3.Row) -> dict:
+def application_dict(row) -> dict:
+    deadline = row["deadline"]
+    if isinstance(deadline, (date, datetime)):
+        deadline = deadline.isoformat()[:10]
     return {"id": row["id"], "company": row["company"], "role": row["role"],
-            "status": row["status"], "deadline": row["deadline"]}
+            "status": row["status"], "deadline": deadline}
+
+
+def b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def issue_token(user_id: int, email: str) -> str:
+    header = b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
+    payload = b64url(json.dumps({"sub": str(user_id), "email": email,
+                               "exp": int(time.time()) + TOKEN_TTL_SECONDS}, separators=(",", ":")).encode())
+    unsigned = f"{header}.{payload}"
+    signature = b64url(hmac.new(AUTH_SECRET, unsigned.encode(), hashlib.sha256).digest())
+    return f"{unsigned}.{signature}"
+
+
+def parse_token(token: str):
+    try:
+        header, payload, signature = token.split(".")
+        unsigned = f"{header}.{payload}"
+        expected = b64url(hmac.new(AUTH_SECRET, unsigned.encode(), hashlib.sha256).digest())
+        if not hmac.compare_digest(signature, expected):
+            return None
+        decoded = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        if int(decoded["exp"]) <= int(time.time()):
+            return None
+        return {"id": int(decoded["sub"]), "email": str(decoded["email"])}
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return None
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -75,24 +150,48 @@ class Handler(SimpleHTTPRequestHandler):
             raise ValueError("Expected a JSON object.")
         return data
 
+    def current_user(self):
+        authorization = self.headers.get("Authorization", "")
+        if not authorization.startswith("Bearer "):
+            self.send_json({"error": "Sign in to continue."}, 401)
+            return None
+        user = parse_token(authorization[7:].strip())
+        if user is None:
+            self.send_json({"error": "Your session expired. Please sign in again."}, 401)
+        return user
+
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         if path == "/api/health":
             try:
                 with connect_db() as db:
-                    db.execute("SELECT 1")
-                self.send_json({"status": "ok", "database": "connected"})
-            except sqlite3.Error:
+                    execute(db, "SELECT 1")
+                self.send_json({"status": "ok", "database": "postgresql" if USE_POSTGRES else "sqlite"})
+            except Exception:
                 self.send_json({"status": "error", "database": "unavailable"}, 503)
             return
+        if path == "/api/auth/me":
+            user = self.current_user()
+            if user:
+                self.send_json({"user": user})
+            return
         if path == "/api/applications":
+            user = self.current_user()
+            if not user:
+                return
             with connect_db() as db:
-                rows = db.execute("SELECT * FROM applications ORDER BY deadline, id").fetchall()
+                rows = execute(db, "SELECT * FROM applications WHERE user_id = ? ORDER BY deadline, id",
+                               (user["id"],)).fetchall()
             self.send_json([application_dict(row) for row in rows])
             return
         if path == "/api/recommendations":
+            user = self.current_user()
+            if not user:
+                return
             with connect_db() as db:
-                roles = [row[0].lower() for row in db.execute("SELECT role FROM applications")]
+                roles = [row["role"].lower() for row in execute(
+                    db, "SELECT role FROM applications WHERE user_id = ?", (user["id"],)
+                )]
             matched = sum(1 for role in roles if any(word in role for word in ("software", "engineer", "developer")))
             self.send_json({"title": "Data structures & algorithms", "matched_roles": matched,
                             "match_boost": min(12, 4 + matched * 2), "topics": 3})
@@ -100,39 +199,110 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:
-        if urlparse(self.path).path != "/api/applications":
-            self.send_json({"error": "Endpoint not found."}, 404)
-            return
+        path = urlparse(self.path).path
         try:
             data = self.read_json()
-            company = str(data.get("company", "")).strip()
-            role = str(data.get("role", "")).strip()
-            status = str(data.get("status", "Applied"))
-            deadline = str(data.get("deadline", ""))
-            if not company or len(company) > 100:
-                raise ValueError("Company is required and must be 100 characters or fewer.")
-            if not role or len(role) > 140:
-                raise ValueError("Role is required and must be 140 characters or fewer.")
-            if status not in VALID_STATUSES:
-                raise ValueError("Choose a valid application status.")
-            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", deadline):
-                raise ValueError("Enter a valid deadline.")
-            date.fromisoformat(deadline)
-            with connect_db() as db:
-                cursor = db.execute("INSERT INTO applications(company, role, status, deadline) VALUES (?, ?, ?, ?)",
-                                    (company, role, status, deadline))
-                row = db.execute("SELECT * FROM applications WHERE id = ?", (cursor.lastrowid,)).fetchone()
-            self.send_json(application_dict(row), 201)
         except (ValueError, json.JSONDecodeError) as error:
             self.send_json({"error": str(error)}, 400)
+            return
+
+        if path in ("/api/auth/register", "/api/auth/login"):
+            email = str(data.get("email", "")).strip().lower()
+            password = str(data.get("password", ""))
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
+                self.send_json({"error": "Enter a valid email address."}, 400)
+                return
+            if path.endswith("register"):
+                if len(password) < 10 or len(password) > 128:
+                    self.send_json({"error": "Use a password between 10 and 128 characters."}, 400)
+                    return
+                salt = secrets.token_bytes(16)
+                digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_ITERATIONS)
+                stored_hash = f"pbkdf2_sha256${PASSWORD_ITERATIONS}${b64url(salt)}${b64url(digest)}"
+                try:
+                    with connect_db() as db:
+                        if USE_POSTGRES:
+                            row = execute(db, "INSERT INTO users(email, password_hash) VALUES (?, ?) RETURNING id, email",
+                                          (email, stored_hash)).fetchone()
+                        else:
+                            cursor = execute(db, "INSERT INTO users(email, password_hash) VALUES (?, ?)",
+                                             (email, stored_hash))
+                            row = execute(db, "SELECT id, email FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()
+                    user = {"id": row["id"], "email": row["email"]}
+                    self.send_json({"user": user, "token": issue_token(user["id"], user["email"])}, 201)
+                except sqlite3.IntegrityError:
+                    self.send_json({"error": "An account with that email already exists."}, 409)
+                except Exception as error:
+                    if USE_POSTGRES and error.__class__.__name__ == "UniqueViolation":
+                        self.send_json({"error": "An account with that email already exists."}, 409)
+                    else:
+                        raise
+                return
+
+            with connect_db() as db:
+                row = execute(db, "SELECT id, email, password_hash FROM users WHERE email = ?", (email,)).fetchone()
+            valid = False
+            if row:
+                try:
+                    scheme, iterations, salt, stored = row["password_hash"].split("$")
+                    candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                                                    base64.urlsafe_b64decode(salt + "=" * (-len(salt) % 4)),
+                                                    int(iterations))
+                    valid = scheme == "pbkdf2_sha256" and hmac.compare_digest(b64url(candidate), stored)
+                except (ValueError, TypeError):
+                    valid = False
+            if not valid:
+                self.send_json({"error": "Email or password is incorrect."}, 401)
+                return
+            user = {"id": row["id"], "email": row["email"]}
+            self.send_json({"user": user, "token": issue_token(user["id"], user["email"])})
+            return
+
+        if path != "/api/applications":
+            self.send_json({"error": "Endpoint not found."}, 404)
+            return
+        user = self.current_user()
+        if not user:
+            return
+        company = str(data.get("company", "")).strip()
+        role = str(data.get("role", "")).strip()
+        status = str(data.get("status", "Applied"))
+        deadline = str(data.get("deadline", ""))
+        if not company or len(company) > 100:
+            self.send_json({"error": "Company is required and must be 100 characters or fewer."}, 400)
+            return
+        if not role or len(role) > 140:
+            self.send_json({"error": "Role is required and must be 140 characters or fewer."}, 400)
+            return
+        if status not in VALID_STATUSES:
+            self.send_json({"error": "Choose a valid application status."}, 400)
+            return
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", deadline):
+            self.send_json({"error": "Enter a valid deadline."}, 400)
+            return
+        try:
+            parsed_deadline = date.fromisoformat(deadline)
+        except ValueError:
+            self.send_json({"error": "Enter a valid deadline."}, 400)
+            return
+        with connect_db() as db:
+            row = execute(db,
+                "INSERT INTO applications(user_id, company, role, status, deadline) VALUES (?, ?, ?, ?, ?) RETURNING *",
+                (user["id"], company, role, status, parsed_deadline if USE_POSTGRES else deadline),
+            ).fetchone()
+        self.send_json(application_dict(row), 201)
 
     def do_DELETE(self) -> None:
+        user = self.current_user()
+        if not user:
+            return
         match = re.fullmatch(r"/api/applications/(\d+)", urlparse(self.path).path)
         if not match:
             self.send_json({"error": "Endpoint not found."}, 404)
             return
         with connect_db() as db:
-            cursor = db.execute("DELETE FROM applications WHERE id = ?", (int(match.group(1)),))
+            cursor = execute(db, "DELETE FROM applications WHERE id = ? AND user_id = ?",
+                             (int(match.group(1)), user["id"]))
         if cursor.rowcount == 0:
             self.send_json({"error": "Application not found."}, 404)
             return

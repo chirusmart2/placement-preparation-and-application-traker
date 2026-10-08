@@ -1,4 +1,6 @@
 let applications = [];
+let authToken = sessionStorage.getItem('pathway-auth-token') || '';
+let authMode = 'login';
 const esc = (text) => String(text).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const formatDate = (value, options = { month: 'short', day: 'numeric' }) => new Date(`${value}T12:00:00`).toLocaleDateString('en-US', options);
 const getLogoClass = (company) => {
@@ -13,7 +15,7 @@ function renderApplications() {
   const rows = applications.slice(0, 5).map((app, index) => {
     const logo = app.logo || app.company.trim().charAt(0).toUpperCase();
     const logoClass = app.logoClass || getLogoClass(app.company);
-    const statusClass = app.status.toLowerCase().replaceAll(' ', '-');
+    const statusClass = app.status === 'In review' ? 'review' : app.status.toLowerCase();
     return `<tr><td><div class="company-cell"><span class="company-logo ${logoClass}">${esc(logo)}</span><span class="company-name"><strong>${esc(app.company)}</strong><small>${esc(app.role)}</small></span></div></td><td><span class="status status-${esc(statusClass)}">${esc(app.status)}</span></td><td class="deadline">${formatDate(app.deadline)}</td><td><button class="row-menu" aria-label="Remove ${esc(app.company)} application" data-remove="${esc(app.id)}">···</button></td></tr>`;
   }).join('');
   document.querySelector('#application-rows').innerHTML = rows;
@@ -33,12 +35,31 @@ function renderEvents() {
   document.querySelector('#event-list').innerHTML = events || '<p class="welcome-sub">No upcoming dates yet. Add an application to get started.</p>';
 }
 async function loadDashboard() {
+  if (!authToken) {
+    document.querySelector('#auth-gate').hidden = false;
+    return;
+  }
   try {
-    const [applicationResponse, recommendationResponse] = await Promise.all([
-      fetch('/api/applications'),
-      fetch('/api/recommendations')
+    const headers = { Authorization: `Bearer ${authToken}` };
+    const [meResponse, applicationResponse, recommendationResponse] = await Promise.all([
+      fetch('/api/auth/me', { headers }),
+      fetch('/api/applications', { headers }),
+      fetch('/api/recommendations', { headers })
     ]);
+    if ([meResponse, applicationResponse, recommendationResponse].some((response) => response.status === 401)) {
+      authToken = '';
+      sessionStorage.removeItem('pathway-auth-token');
+      document.querySelector('#auth-gate').hidden = false;
+      return;
+    }
     if (!applicationResponse.ok || !recommendationResponse.ok) throw new Error('The API did not respond successfully.');
+    const { user } = await meResponse.json();
+    const name = user.email.split('@')[0];
+    document.querySelector('#profile-name').textContent = name;
+    document.querySelector('#profile-email').textContent = user.email;
+    document.querySelector('#profile-avatar').textContent = name.slice(0, 2).toUpperCase();
+    document.querySelector('.top-avatar').textContent = name.slice(0, 2).toUpperCase();
+    document.querySelector('#auth-gate').hidden = true;
     applications = await applicationResponse.json();
     const recommendation = await recommendationResponse.json();
     renderApplications();
@@ -51,6 +72,51 @@ async function loadDashboard() {
     console.error(error);
   }
 }
+function setAuthMode(mode) {
+  authMode = mode;
+  const registering = mode === 'register';
+  document.querySelector('#auth-title').textContent = registering ? 'Create your account' : 'Welcome back';
+  document.querySelector('#auth-subtitle').textContent = registering ? 'Create a private space for your placement journey.' : 'Sign in to keep your applications private and in sync.';
+  document.querySelector('#auth-submit').innerHTML = registering ? 'Create account <span>→</span>' : 'Sign in <span>→</span>';
+  document.querySelector('#auth-switch-copy').textContent = registering ? 'Already have an account?' : 'New to Pathway?';
+  document.querySelector('#auth-toggle').textContent = registering ? 'Sign in' : 'Create an account';
+  document.querySelector('#auth-form [name="password"]').autocomplete = registering ? 'new-password' : 'current-password';
+  document.querySelector('#auth-form [name="password"]').minLength = registering ? 10 : 1;
+  document.querySelector('#auth-error').hidden = true;
+}
+document.querySelector('#auth-toggle').addEventListener('click', () => setAuthMode(authMode === 'login' ? 'register' : 'login'));
+document.querySelector('#auth-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const error = document.querySelector('#auth-error');
+  const submit = document.querySelector('#auth-submit');
+  submit.disabled = true;
+  error.hidden = true;
+  try {
+    const response = await fetch(`/api/auth/${authMode === 'register' ? 'register' : 'login'}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: form.get('email').trim(), password: form.get('password') })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Authentication failed.');
+    authToken = data.token;
+    sessionStorage.setItem('pathway-auth-token', authToken);
+    event.currentTarget.reset();
+    await loadDashboard();
+  } catch (caught) {
+    error.textContent = caught.message;
+    error.hidden = false;
+  } finally {
+    submit.disabled = false;
+  }
+});
+document.querySelector('#logout-button').addEventListener('click', () => {
+  authToken = '';
+  sessionStorage.removeItem('pathway-auth-token');
+  applications = [];
+  document.querySelector('#auth-gate').hidden = false;
+  setAuthMode('login');
+});
 const applicationDialog = document.querySelector('#application-dialog');
 const openApplicationDialog = () => applicationDialog.showModal();
 document.querySelector('#add-application').addEventListener('click', openApplicationDialog);
@@ -59,7 +125,7 @@ document.querySelector('#application-form').addEventListener('submit', (event) =
   if (event.submitter?.classList.contains('dialog-close')) return;
   event.preventDefault();
   const form = new FormData(event.currentTarget);
-  fetch('/api/applications', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ company: form.get('company').trim(), role: form.get('role').trim(), status: form.get('status'), deadline: form.get('deadline') }) })
+  fetch('/api/applications', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` }, body: JSON.stringify({ company: form.get('company').trim(), role: form.get('role').trim(), status: form.get('status'), deadline: form.get('deadline') }) })
     .then(async (response) => { if (!response.ok) throw new Error((await response.json()).error || 'Could not save application.'); return response.json(); })
     .then(() => { event.currentTarget.reset(); applicationDialog.close(); return loadDashboard(); })
     .catch((error) => alert(error.message));
@@ -67,7 +133,7 @@ document.querySelector('#application-form').addEventListener('submit', (event) =
 document.querySelector('#application-rows').addEventListener('click', (event) => {
   const button = event.target.closest('[data-remove]');
   if (!button) return;
-  fetch(`/api/applications/${encodeURIComponent(button.dataset.remove)}`, { method: 'DELETE' })
+  fetch(`/api/applications/${encodeURIComponent(button.dataset.remove)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${authToken}` } })
     .then((response) => { if (!response.ok) throw new Error('Could not remove application.'); return loadDashboard(); })
     .catch((error) => alert(error.message));
 });

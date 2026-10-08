@@ -1,1 +1,2 @@
-# Pathway uses only the Python standard library.
+# psycopg is imported only when DATABASE_URL points to PostgreSQL.
+psycopg[binary]>=3.2,<4

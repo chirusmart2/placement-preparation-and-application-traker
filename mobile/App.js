@@ -32,6 +32,11 @@ function Badge({ status }) {
 
 export default function App() {
   const [tab, setTab] = useState('Home');
+  const [token, setToken] = useState('');
+  const [authMode, setAuthMode] = useState('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
   const [applications, setApplications] = useState([]);
   const [recommendation, setRecommendation] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -47,10 +52,15 @@ export default function App() {
   const [error, setError] = useState('');
 
   const load = useCallback(async (quiet = false) => {
+    if (!token) { setLoading(false); return; }
     if (!quiet) setLoading(true);
     setError('');
     try {
-      const [items, skills] = await Promise.all([request('/api/applications'), request('/api/recommendations')]);
+      const headers = { Authorization: `Bearer ${token}` };
+      const [items, skills] = await Promise.all([
+        request('/api/applications', { headers }),
+        request('/api/recommendations', { headers })
+      ]);
       setApplications(items);
       setRecommendation(skills);
     } catch (err) {
@@ -59,13 +69,13 @@ export default function App() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [token]);
 
   useEffect(() => { load(); }, [load]);
 
   const saveApplication = async () => {
     try {
-      await request('/api/applications', { method: 'POST', body: JSON.stringify({ company, role, status, deadline }) });
+      await request('/api/applications', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify({ company, role, status, deadline }) });
       setCompany(''); setRole(''); setDeadline(''); setStatus('Applied'); setModalOpen(false);
       await load(true);
     } catch (err) { Alert.alert('Could not save', err.message); }
@@ -74,12 +84,23 @@ export default function App() {
   const removeApplication = (item) => Alert.alert('Remove application?', `${item.company} will be removed from your tracker.`, [
     { text: 'Cancel', style: 'cancel' },
     { text: 'Remove', style: 'destructive', onPress: async () => {
-      try { await request(`/api/applications/${item.id}`, { method: 'DELETE' }); await load(true); }
+      try { await request(`/api/applications/${item.id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }); await load(true); }
       catch (err) { Alert.alert('Could not remove', err.message); }
     } }
   ]);
 
   const startPractice = () => { setQuestionIndex(0); setAnswer(''); setShowHint(false); setTab('Practice'); };
+  const submitAuth = async () => {
+    setAuthBusy(true); setError('');
+    try {
+      const response = await request(`/api/auth/${authMode === 'register' ? 'register' : 'login'}`, {
+        method: 'POST', body: JSON.stringify({ email: email.trim(), password })
+      });
+      setToken(response.token);
+      setPassword('');
+    } catch (err) { setError(err.message); }
+    finally { setAuthBusy(false); }
+  };
   const nextQuestion = () => {
     if (questionIndex === QUESTIONS.length - 1) {
       setQuestionIndex(0); setAnswer(''); setShowHint(false);
@@ -102,6 +123,10 @@ export default function App() {
   );
 
   const content = () => {
+    if (!token) return <ScrollView contentContainerStyle={styles.pageContent} keyboardShouldPersistTaps="handled">
+      <Text style={styles.kicker}>YOUR PLACEMENT JOURNEY</Text><Text style={styles.title}>{authMode === 'register' ? 'Create your account' : 'Welcome back'}</Text><Text style={styles.subtitle}>Sign in to keep your applications private and in sync.</Text>
+      <View style={styles.featureCard}><Text style={styles.inputLabel}>EMAIL ADDRESS</Text><TextInput value={email} onChangeText={setEmail} autoCapitalize="none" autoComplete="email" keyboardType="email-address" placeholder="you@example.com" style={styles.input} /><Text style={styles.inputLabel}>PASSWORD · AT LEAST 10 CHARACTERS</Text><TextInput value={password} onChangeText={setPassword} secureTextEntry autoCapitalize="none" autoComplete={authMode === 'register' ? 'new-password' : 'current-password'} placeholder="Enter your password" style={styles.input} />{error ? <Text style={styles.authError}>{error}</Text> : null}<Pressable disabled={authBusy || !email.trim() || password.length < (authMode === 'register' ? 10 : 1)} style={[styles.button, { marginTop: 17 }, (authBusy || !email.trim() || password.length < (authMode === 'register' ? 10 : 1)) && styles.buttonDisabled]} onPress={submitAuth}><Text style={styles.buttonText}>{authBusy ? 'Please wait…' : authMode === 'register' ? 'Create account →' : 'Sign in →'}</Text></Pressable><Pressable style={{ marginTop: 16, alignItems: 'center' }} onPress={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setError(''); }}><Text style={styles.inlineLink}>{authMode === 'login' ? 'New to Pathway? Create an account' : 'Already have an account? Sign in'}</Text></Pressable><Text style={styles.authFootnote}>Your applications are only visible to your account.</Text></View>
+    </ScrollView>;
     if (loading) return <View style={styles.center}><ActivityIndicator color={COLORS.green} /><Text style={styles.muted}>Loading your placement dashboard…</Text></View>;
     if (error) return <View style={styles.errorCard}><Text style={styles.errorTitle}>Can’t reach your tracker</Text><Text style={styles.errorText}>{error}</Text><Pressable style={styles.button} onPress={() => load()}><Text style={styles.buttonText}>Try again</Text></Pressable></View>;
 
@@ -136,9 +161,9 @@ export default function App() {
 
   return <SafeAreaView style={styles.safe}>
     <StatusBar barStyle="dark-content" backgroundColor={COLORS.canvas} />
-    <View style={styles.header}><View style={styles.brandMark}><Text style={styles.brandMarkText}>p</Text></View><Text style={styles.brand}>pathway<Text style={{ color: '#39815b' }}>.</Text></Text><View style={{ flex: 1 }} /><Text style={styles.profile}>AS</Text></View>
+    <View style={styles.header}><View style={styles.brandMark}><Text style={styles.brandMarkText}>p</Text></View><Text style={styles.brand}>pathway<Text style={{ color: '#39815b' }}>.</Text></Text><View style={{ flex: 1 }} />{token ? <Pressable onPress={() => { setToken(''); setApplications([]); setTab('Home'); }}><Text style={styles.signOut}>Sign out</Text></Pressable> : <Text style={styles.profile}>AS</Text>}</View>
     <View style={styles.content}>{content()}</View>
-    <View style={styles.tabBar}>{TABS.map((item, index) => <Pressable key={item} onPress={() => setTab(item)} style={styles.tabItem}><Text style={[styles.tabIcon, tab === item && styles.tabActive]}>{['◫', '▤', '✳', '◎'][index]}</Text><Text style={[styles.tabLabel, tab === item && styles.tabActive]}>{item}</Text></Pressable>)}</View>
+    {token ? <View style={styles.tabBar}>{TABS.map((item, index) => <Pressable key={item} onPress={() => setTab(item)} style={styles.tabItem}><Text style={[styles.tabIcon, tab === item && styles.tabActive]}>{['◫', '▤', '✳', '◎'][index]}</Text><Text style={[styles.tabLabel, tab === item && styles.tabActive]}>{item}</Text></Pressable>)}</View> : null}
     <Modal visible={modalOpen} transparent animationType="slide" onRequestClose={() => setModalOpen(false)}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalBackdrop}><View style={styles.modalCard}><ScrollView keyboardShouldPersistTaps="handled"><View style={styles.modalHeader}><View><Text style={styles.kicker}>NEW OPPORTUNITY</Text><Text style={styles.modalTitle}>Add an application</Text></View><Pressable onPress={() => setModalOpen(false)}><Text style={styles.close}>×</Text></Pressable></View>
         <Text style={styles.inputLabel}>COMPANY NAME</Text><TextInput value={company} onChangeText={setCompany} placeholder="e.g. Stripe" style={styles.input} />
@@ -164,7 +189,7 @@ const styles = StyleSheet.create({
   practiceBanner: { backgroundColor: COLORS.green, borderRadius: 11, padding: 16, marginTop: 18 }, bannerKicker: { color: '#b8d7c4', fontSize: 8, fontWeight: '800', letterSpacing: 0.9 }, bannerTitle: { color: COLORS.white, fontSize: 15, fontWeight: '700', lineHeight: 21, marginTop: 8, maxWidth: 280 }, bannerButton: { alignSelf: 'flex-start', backgroundColor: COLORS.white, borderRadius: 7, paddingHorizontal: 11, paddingVertical: 9, marginTop: 13 }, bannerButtonText: { color: COLORS.green, fontSize: 10, fontWeight: '700' },
   applicationCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.line, borderRadius: 10, padding: 12, marginBottom: 9 }, companyMark: { width: 35, height: 35, borderRadius: 9, backgroundColor: COLORS.pale, alignItems: 'center', justifyContent: 'center' }, companyInitial: { color: COLORS.green, fontSize: 13, fontWeight: '800' }, applicationInfo: { flex: 1, marginLeft: 10, gap: 4 }, applicationMeta: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 3 }, deadline: { color: COLORS.muted, fontSize: 9 }, deleteButton: { paddingHorizontal: 8, paddingVertical: 2 }, deleteText: { color: '#9ba29b', fontSize: 18 }, listContent: { paddingHorizontal: 17, paddingBottom: 20 }, smallAdd: { backgroundColor: COLORS.green, paddingHorizontal: 11, paddingVertical: 8, borderRadius: 7 }, smallAddText: { color: COLORS.white, fontSize: 10, fontWeight: '700' }, emptyText: { color: COLORS.muted, textAlign: 'center', marginTop: 35, fontSize: 12 },
   featureCard: { backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.line, borderRadius: 12, padding: 16, marginTop: 16 }, cardLabel: { color: COLORS.muted, fontSize: 8, fontWeight: '800', letterSpacing: 0.9 }, question: { color: COLORS.ink, fontSize: 20, lineHeight: 28, fontWeight: '700', marginTop: 12 }, hintIntro: { color: COLORS.muted, fontSize: 10, lineHeight: 16, marginTop: 11 }, answerInput: { minHeight: 112, marginTop: 15, padding: 11, borderWidth: 1, borderColor: COLORS.line, borderRadius: 8, color: COLORS.ink, fontSize: 12 }, hint: { color: '#55735e', backgroundColor: '#f2f7f3', padding: 10, borderRadius: 7, fontSize: 10, lineHeight: 15, marginTop: 10 }, button: { backgroundColor: COLORS.green, borderRadius: 7, minHeight: 42, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 14 }, buttonText: { color: COLORS.white, fontSize: 11, fontWeight: '700' }, buttonDisabled: { opacity: 0.45 }, ornament: { fontSize: 28, color: '#dbece1' }, skillHeading: { flexDirection: 'row', alignItems: 'center', gap: 10 }, match: { color: '#4f8b60', fontSize: 10, fontWeight: '800', backgroundColor: '#edf6ef', padding: 7, borderRadius: 6 }, meter: { height: 5, borderRadius: 4, backgroundColor: '#f0f2ef', marginTop: 18, overflow: 'hidden' }, meterFill: { width: '62%', height: '100%', backgroundColor: '#8abb91' }, topic: { flexDirection: 'row', alignItems: 'center', paddingVertical: 13, borderTopWidth: 1, borderTopColor: '#f0f2ef', marginTop: 8 }, topicNumber: { color: '#6e9b7a', fontSize: 9, fontWeight: '700', width: 28 }, topicTitle: { color: COLORS.ink, fontSize: 10, fontWeight: '600', flex: 1 }, topicTime: { color: COLORS.muted, fontSize: 9 },
-  errorCard: { margin: 20, marginTop: 36, backgroundColor: COLORS.white, padding: 18, borderRadius: 11, borderWidth: 1, borderColor: COLORS.line, gap: 12 }, errorTitle: { color: COLORS.ink, fontSize: 16, fontWeight: '700' }, errorText: { color: COLORS.muted, fontSize: 11, lineHeight: 16 },
+  errorCard: { margin: 20, marginTop: 36, backgroundColor: COLORS.white, padding: 18, borderRadius: 11, borderWidth: 1, borderColor: COLORS.line, gap: 12 }, errorTitle: { color: COLORS.ink, fontSize: 16, fontWeight: '700' }, errorText: { color: COLORS.muted, fontSize: 11, lineHeight: 16 }, authError: { color: '#ae4c42', backgroundColor: '#fdf1f0', padding: 9, borderRadius: 6, fontSize: 10, marginTop: 12 }, authFootnote: { color: '#959d96', fontSize: 9, textAlign: 'center', marginTop: 15 }, signOut: { color: COLORS.green, fontSize: 10, fontWeight: '700', marginRight: 5 },
   tabBar: { height: 60, borderTopWidth: 1, borderTopColor: COLORS.line, backgroundColor: COLORS.white, flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', paddingBottom: Platform.OS === 'ios' ? 0 : 3 }, tabItem: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 3 }, tabIcon: { color: '#929a93', fontSize: 16 }, tabLabel: { color: '#929a93', fontSize: 8, fontWeight: '600' }, tabActive: { color: COLORS.green, fontWeight: '800' },
   modalBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: '#17231db3' }, modalCard: { maxHeight: '92%', backgroundColor: COLORS.white, borderTopLeftRadius: 17, borderTopRightRadius: 17, padding: 20, paddingBottom: 30 }, modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }, modalTitle: { color: COLORS.ink, fontSize: 20, fontWeight: '800', marginTop: 3 }, close: { color: COLORS.muted, fontSize: 27, paddingHorizontal: 6 }, inputLabel: { color: '#69736b', fontSize: 8, fontWeight: '800', letterSpacing: 0.6, marginTop: 12, marginBottom: 6 }, input: { borderWidth: 1, borderColor: '#e5eae5', borderRadius: 7, paddingHorizontal: 11, paddingVertical: 11, color: COLORS.ink, fontSize: 11 }, statusChoices: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginBottom: 16 }, statusChoice: { borderWidth: 1, borderColor: '#e5eae5', borderRadius: 15, paddingHorizontal: 10, paddingVertical: 7 }, statusChoiceSelected: { backgroundColor: COLORS.pale, borderColor: '#cce3d2' }, statusChoiceText: { color: COLORS.muted, fontSize: 9 }, statusChoiceTextSelected: { color: COLORS.green, fontWeight: '700' }
 });
