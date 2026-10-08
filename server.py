@@ -68,8 +68,23 @@ def initialize_db() -> None:
             id {user_id_column},
             email TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
+            full_name TEXT NOT NULL DEFAULT '',
+            university TEXT NOT NULL DEFAULT '',
+            target_role TEXT NOT NULL DEFAULT '',
+            graduation_date TEXT NOT NULL DEFAULT '',
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""")
+
+        if USE_POSTGRES:
+            execute(db, "ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT ''")
+            execute(db, "ALTER TABLE users ADD COLUMN IF NOT EXISTS university TEXT NOT NULL DEFAULT ''")
+            execute(db, "ALTER TABLE users ADD COLUMN IF NOT EXISTS target_role TEXT NOT NULL DEFAULT ''")
+            execute(db, "ALTER TABLE users ADD COLUMN IF NOT EXISTS graduation_date TEXT NOT NULL DEFAULT ''")
+        else:
+            user_columns = {row["name"] for row in execute(db, "PRAGMA table_info(users)").fetchall()}
+            for column in ("full_name", "university", "target_role", "graduation_date"):
+                if column not in user_columns:
+                    execute(db, f"ALTER TABLE users ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
 
         id_column = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
         deadline_column = "DATE NOT NULL" if USE_POSTGRES else "TEXT NOT NULL"
@@ -158,6 +173,13 @@ class Handler(SimpleHTTPRequestHandler):
         user = parse_token(authorization[7:].strip())
         if user is None:
             self.send_json({"error": "Your session expired. Please sign in again."}, 401)
+            return None
+        with connect_db() as db:
+            row = execute(db, "SELECT email FROM users WHERE id = ?", (user["id"],)).fetchone()
+        if not row:
+            self.send_json({"error": "Account not found. Please sign in again."}, 401)
+            return None
+        user["email"] = row["email"]
         return user
 
     def do_GET(self) -> None:
@@ -173,7 +195,13 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/auth/me":
             user = self.current_user()
             if user:
-                self.send_json({"user": user})
+                with connect_db() as db:
+                    row = execute(db, "SELECT id, email, full_name, university, target_role, graduation_date FROM users WHERE id = ?",
+                                  (user["id"],)).fetchone()
+                if not row:
+                    self.send_json({"error": "Account not found."}, 404)
+                    return
+                self.send_json({"user": dict(row)})
             return
         if path == "/api/applications":
             user = self.current_user()
@@ -192,9 +220,21 @@ class Handler(SimpleHTTPRequestHandler):
                 roles = [row["role"].lower() for row in execute(
                     db, "SELECT role FROM applications WHERE user_id = ?", (user["id"],)
                 )]
-            matched = sum(1 for role in roles if any(word in role for word in ("software", "engineer", "developer")))
-            self.send_json({"title": "Data structures & algorithms", "matched_roles": matched,
-                            "match_boost": min(12, 4 + matched * 2), "topics": 3})
+                profile = execute(db, "SELECT target_role FROM users WHERE id = ?", (user["id"],)).fetchone()
+            target_role = profile["target_role"] if profile else ""
+            keywords = {word for word in re.findall(r"[a-z0-9]+", target_role.lower()) if len(word) > 2}
+            matched = sum(1 for role in roles if keywords and any(word in role for word in keywords))
+            if any(word in target_role.lower() for word in ("software", "engineer", "developer", "backend", "frontend")):
+                topics = ["Data structures & algorithms", "Trees and graph traversal", "Practice common patterns"]
+            elif any(word in target_role.lower() for word in ("data", "analyst", "analytics")):
+                topics = ["SQL queries and joins", "Statistics fundamentals", "Communicating insights"]
+            elif any(word in target_role.lower() for word in ("design", "ux", "product")):
+                topics = ["Portfolio case studies", "User research methods", "Product thinking"]
+            else:
+                topics = ["Role specific interview practice", "Communication and STAR stories", "Review your target role"]
+            self.send_json({"title": topics[0], "target_role": target_role, "matched_roles": matched,
+                            "match_boost": round(matched / len(roles) * 100) if roles else None,
+                            "topics": topics})
             return
         super().do_GET()
 
@@ -219,16 +259,29 @@ class Handler(SimpleHTTPRequestHandler):
                 salt = secrets.token_bytes(16)
                 digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_ITERATIONS)
                 stored_hash = f"pbkdf2_sha256${PASSWORD_ITERATIONS}${b64url(salt)}${b64url(digest)}"
+                full_name = str(data.get("full_name", "")).strip()[:80]
+                university = str(data.get("university", "")).strip()[:120]
+                target_role = str(data.get("target_role", "")).strip()[:120]
+                graduation_date = str(data.get("graduation_date", "")).strip()
+                if graduation_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", graduation_date):
+                    self.send_json({"error": "Enter a valid graduation date."}, 400)
+                    return
+                if graduation_date:
+                    try:
+                        date.fromisoformat(graduation_date)
+                    except ValueError:
+                        self.send_json({"error": "Enter a valid graduation date."}, 400)
+                        return
                 try:
                     with connect_db() as db:
                         if USE_POSTGRES:
-                            row = execute(db, "INSERT INTO users(email, password_hash) VALUES (?, ?) RETURNING id, email",
-                                          (email, stored_hash)).fetchone()
+                            row = execute(db, "INSERT INTO users(email, password_hash, full_name, university, target_role, graduation_date) VALUES (?, ?, ?, ?, ?, ?) RETURNING id, email, full_name, university, target_role, graduation_date",
+                                          (email, stored_hash, full_name, university, target_role, graduation_date)).fetchone()
                         else:
-                            cursor = execute(db, "INSERT INTO users(email, password_hash) VALUES (?, ?)",
-                                             (email, stored_hash))
-                            row = execute(db, "SELECT id, email FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()
-                    user = {"id": row["id"], "email": row["email"]}
+                            cursor = execute(db, "INSERT INTO users(email, password_hash, full_name, university, target_role, graduation_date) VALUES (?, ?, ?, ?, ?, ?)",
+                                             (email, stored_hash, full_name, university, target_role, graduation_date))
+                            row = execute(db, "SELECT id, email, full_name, university, target_role, graduation_date FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()
+                    user = dict(row)
                     self.send_json({"user": user, "token": issue_token(user["id"], user["email"])}, 201)
                 except sqlite3.IntegrityError:
                     self.send_json({"error": "An account with that email already exists."}, 409)
@@ -240,7 +293,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return
 
             with connect_db() as db:
-                row = execute(db, "SELECT id, email, password_hash FROM users WHERE email = ?", (email,)).fetchone()
+                row = execute(db, "SELECT id, email, password_hash, full_name, university, target_role, graduation_date FROM users WHERE email = ?", (email,)).fetchone()
             valid = False
             if row:
                 try:
@@ -254,7 +307,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not valid:
                 self.send_json({"error": "Email or password is incorrect."}, 401)
                 return
-            user = {"id": row["id"], "email": row["email"]}
+            user = {key: row[key] for key in ("id", "email", "full_name", "university", "target_role", "graduation_date")}
             self.send_json({"user": user, "token": issue_token(user["id"], user["email"])})
             return
 
@@ -291,6 +344,41 @@ class Handler(SimpleHTTPRequestHandler):
                 (user["id"], company, role, status, parsed_deadline if USE_POSTGRES else deadline),
             ).fetchone()
         self.send_json(application_dict(row), 201)
+
+    def do_PATCH(self) -> None:
+        if urlparse(self.path).path != "/api/auth/me":
+            self.send_json({"error": "Endpoint not found."}, 404)
+            return
+        user = self.current_user()
+        if not user:
+            return
+        try:
+            data = self.read_json()
+        except (ValueError, json.JSONDecodeError) as error:
+            self.send_json({"error": str(error)}, 400)
+            return
+        full_name = str(data.get("full_name", "")).strip()
+        university = str(data.get("university", "")).strip()
+        target_role = str(data.get("target_role", "")).strip()
+        graduation_date = str(data.get("graduation_date", "")).strip()
+        if not full_name or len(full_name) > 80:
+            self.send_json({"error": "Enter your name (80 characters or fewer)."}, 400)
+            return
+        if len(university) > 120 or len(target_role) > 120:
+            self.send_json({"error": "University and target role must be 120 characters or fewer."}, 400)
+            return
+        if graduation_date:
+            try:
+                date.fromisoformat(graduation_date)
+            except ValueError:
+                self.send_json({"error": "Enter a valid graduation date."}, 400)
+                return
+        with connect_db() as db:
+            execute(db, "UPDATE users SET full_name = ?, university = ?, target_role = ?, graduation_date = ? WHERE id = ?",
+                    (full_name, university, target_role, graduation_date, user["id"]))
+            row = execute(db, "SELECT id, email, full_name, university, target_role, graduation_date FROM users WHERE id = ?",
+                          (user["id"],)).fetchone()
+        self.send_json({"user": dict(row)})
 
     def do_DELETE(self) -> None:
         user = self.current_user()
