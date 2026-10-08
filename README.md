@@ -47,6 +47,6 @@ Scan the Expo QR code with Expo Go. A physical phone must use your computer's LA
 
 ## Deploy
 
-`render.yaml` configures a Render web service that expects a PostgreSQL `DATABASE_URL` and a private `AUTH_SECRET`. Push this folder to a Git repository, then in Render choose **New → Blueprint** and connect that repository. Add a PostgreSQL connection string as `DATABASE_URL` and generate an unguessable secret for `AUTH_SECRET` when prompted. Do not commit either secret. Render will create the service from the Blueprint and give it a public URL.
+`render.yaml` configures a free Render web service and a free PostgreSQL database. Push this folder to a Git repository, then in Render choose **New → Blueprint** and connect that repository. The Blueprint generates a private `AUTH_SECRET` and connects the web service to PostgreSQL automatically. Render's free web service can spin down when idle, and its free Postgres database expires after 30 days; use a paid database plan for a durable deployment.
 
 The deployment requires a Render account and a PostgreSQL database connection string. The public repository is at <https://github.com/chirusmart2/placement-preparation-and-application-traker>.

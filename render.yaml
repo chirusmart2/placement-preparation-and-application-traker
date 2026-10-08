@@ -2,10 +2,19 @@ services:
   - type: web
     name: pathway-placement-tracker
     runtime: python
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python server.py
+    healthCheckPath: /api/health
     envVars:
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: pathway-placement-db
+          property: connectionString
       - key: AUTH_SECRET
-        sync: false
+        generateValue: true
+databases:
+  - name: pathway-placement-db
+    databaseName: pathway_tracker
+    user: pathway_tracker
+    plan: free

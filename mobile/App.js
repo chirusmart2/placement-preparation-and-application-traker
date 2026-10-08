@@ -20,7 +20,11 @@ async function request(path, options = {}) {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'The server could not complete that request.');
+  if (!response.ok) {
+    const error = new Error(data.error || 'The server could not complete that request.');
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -64,7 +68,8 @@ export default function App() {
       setApplications(items);
       setRecommendation(skills);
     } catch (err) {
-      setError(`${err.message} API: ${API_URL}`);
+      if (err.status === 401) { setToken(''); setApplications([]); }
+      else setError(`${err.message} API: ${API_URL}`);
     } finally {
       setLoading(false);
       setRefreshing(false);
