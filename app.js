@@ -125,10 +125,11 @@ document.querySelector('#add-inline').addEventListener('click', openApplicationD
 document.querySelector('#application-form').addEventListener('submit', (event) => {
   if (event.submitter?.classList.contains('dialog-close')) return;
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
   fetch('/api/applications', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` }, body: JSON.stringify({ company: form.get('company').trim(), role: form.get('role').trim(), status: form.get('status'), deadline: form.get('deadline') }) })
     .then(async (response) => { if (!response.ok) throw new Error((await response.json()).error || 'Could not save application.'); return response.json(); })
-    .then(() => { event.currentTarget.reset(); applicationDialog.close(); return loadDashboard(); })
+    .then(() => { formElement.reset(); applicationDialog.close(); return loadDashboard(); })
     .catch((error) => alert(error.message));
 });
 document.querySelector('#application-rows').addEventListener('click', (event) => {
