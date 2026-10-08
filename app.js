@@ -87,7 +87,8 @@ function setAuthMode(mode) {
 document.querySelector('#auth-toggle').addEventListener('click', () => setAuthMode(authMode === 'login' ? 'register' : 'login'));
 document.querySelector('#auth-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
   const error = document.querySelector('#auth-error');
   const submit = document.querySelector('#auth-submit');
   submit.disabled = true;
@@ -101,7 +102,7 @@ document.querySelector('#auth-form').addEventListener('submit', async (event) =>
     if (!response.ok) throw new Error(data.error || 'Authentication failed.');
     authToken = data.token;
     sessionStorage.setItem('pathway-auth-token', authToken);
-    event.currentTarget.reset();
+    formElement.reset();
     await loadDashboard();
   } catch (caught) {
     error.textContent = caught.message;
