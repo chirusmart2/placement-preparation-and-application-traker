@@ -74,14 +74,14 @@ function renderEvents() {
   document.querySelector('#event-list').innerHTML = events || '<p class="welcome-sub">No upcoming dates in your saved applications. Add an opportunity with a deadline to see it here.</p>';
 }
 function renderAccount() {
-  const emailName = currentUser.email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
-  const name = currentUser.full_name?.trim() || emailName;
+  const name = currentUser.full_name?.trim() || '';
+  const displayName = name || 'Your profile';
   const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || '?';
-  document.querySelector('#profile-name').textContent = name;
+  document.querySelector('#profile-name').textContent = displayName;
   document.querySelector('#profile-email').textContent = currentUser.email;
   document.querySelector('#profile-avatar').textContent = initials;
   document.querySelector('#top-profile-button').textContent = initials;
-  document.querySelector('#welcome-title').textContent = formatGreeting(name);
+  document.querySelector('#welcome-title').textContent = name ? formatGreeting(name) : 'Your placement journey';
   document.querySelector('#welcome-subtitle').textContent = currentUser.target_role
     ? `Your ${currentUser.target_role} placement plan, synced to your account.`
     : 'Your applications and progress, synced to your account.';
